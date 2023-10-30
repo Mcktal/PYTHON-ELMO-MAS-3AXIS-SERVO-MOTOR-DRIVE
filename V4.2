@@ -1,0 +1,255 @@
+import socket
+import pandas as pd
+import time
+import numpy as np
+from scipy.fft import fft
+from datetime import datetime
+from openpyxl import Workbook
+from openpyxl import load_workbook
+from openpyxl.workbook import Workbook
+from openpyxl.utils.dataframe import dataframe_to_rows
+import tkinter as tk
+from tkinter import ttk
+import threading
+import sys
+
+# Define IP and port to connect with
+UDP_IP = "192.168.1.7"
+UDP_PORT = 5001
+
+# Create empty DataFrames to store data for each sensor type
+gdata = pd.DataFrame(columns=["ID", "sensing_type", "value", "timestamp"])
+position_data = pd.DataFrame(columns=["ID", "value", "timestamp", "dt", "dx", "x1", "dx1", "x11", "fft"])
+speed_data = pd.DataFrame(columns=["ID", "value", "timestamp", "dt", "dv", "v1", "fft"])
+current_data = pd.DataFrame(columns=["ID", "value", "timestamp", "fft"])
+
+# Function to process and add user data into dataframes
+def process_input(a, b):
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    if a is not None:
+        if b == 1:
+            if not position_data.empty:
+                last_timestamp = datetime.strptime(position_data["timestamp"].iloc[-1], "%Y-%m-%d %H:%M:%S")
+                current_timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                dt = (current_timestamp - last_timestamp).total_seconds()
+                last_value = position_data["value"].iloc[-1]
+                dx = a - last_value
+                x1 = dx / dt if dt > 0 else 0.0
+                if len(position_data) >= 2:
+                    last_x1 = position_data["x1"].iloc[-1]
+                    dx1 = x1 - last_x1
+                else:
+                    dx1 = 0.0
+                x11 = dx1 / dt if dt > 0 else 0.0
+            else:
+                dt, dx, x1, dx1, x11 = 0.0, 0.0, 0.0, 0.0, 0.0
+            if not position_data.empty:
+                values = position_data["value"].values[-100:]  # Use only the last 100 values for FFT
+                fft_result = fft(np.append(values, a))
+            else:
+                fft_result = np.zeros(100)  # Initialize with zeros if position_data is empty
+            position_data.loc[len(position_data)] = [len(position_data) + 1, a, timestamp, dt, dx, x1, dx1, x11, fft_result[-1].real]  # Store only the last FFT value
+            full_sensor_type = "position"
+        elif b == 2:
+            if not speed_data.empty:
+                last_timestamp = datetime.strptime(speed_data["timestamp"].iloc[-1], "%Y-%m-%d %H:%M:%S")
+                current_timestamp = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+                dt = (current_timestamp - last_timestamp).total_seconds()
+                last_value = speed_data["value"].iloc[-1]
+                dv = a - last_value
+                v1 = dv / dt if dt > 0 else 0.0
+            else:
+                dt, dv, v1 = 0.0, 0.0, 0.0
+            if not speed_data.empty:
+                values = speed_data["value"].values[-100:]  # Use only the last 100 values for FFT
+                fft_result2 = fft(np.append(values, a))
+            else:
+                fft_result2 = np.zeros(100)  # Initialize with zeros if position_data is empty
+                
+            speed_data.loc[len(speed_data)] = [len(speed_data) + 1, a, timestamp, dt, dv, v1, fft_result2[-1].real]
+            full_sensor_type = "speed"
+        elif b == 3:
+            if not current_data.empty:
+                values = current_data["value"].values[-100:]  # Use only the last 100 values for FFT
+                fft_result3 = fft(np.append(values, a))
+            else:
+                fft_result3 = np.zeros(100)  # Initialize with zeros if position_data is empty
+            current_data.loc[len(current_data)] = [len(current_data) + 1, a, timestamp, fft_result3[-1].real]
+            full_sensor_type = "current"
+        else:
+            print("Data inserting error")
+        gdata.loc[len(gdata)] = [len(gdata) + 1, full_sensor_type, a, timestamp]
+    else:
+        print(f"Data insertion error for sensor type {b}: Value is not a valid number.\nthose two parameters didnt saved")
+        sys.exit(1)
+        
+# Function to remove semicolon from a string
+def remove_semicolon(input_string):
+    if input_string.endswith(";"):
+        cleaned = input_string[:-1]
+        return cleaned
+    else:
+        return input_string
+
+# Function to convert a string to a number
+def convert_to_num(input_string):
+    cleaned = remove_semicolon(input_string)
+    if "." in cleaned:
+        try:
+            num = float(cleaned)
+            return num
+        except ValueError:
+            return None
+    else:
+        try:
+            num = int(cleaned)
+            return num
+        except ValueError:
+            return None
+
+# Function to convert position (rev's) to degrees
+def convert_pos_to_deg(number):
+    reminder = number % 10000
+    return reminder
+
+# Function to communicate with the UDP socket
+def comm(byte_message, d):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(byte_message, (UDP_IP, UDP_PORT))
+    data = sock.recv(1024)
+    s = data.decode('utf-8')
+    sock.sendto(byte_message, (UDP_IP, UDP_PORT))
+    data = sock.recv(1024)
+    s = data.decode('utf-8')
+    s = convert_to_num(s)
+    b = d
+    process_input(s, b)
+    time.sleep(3)
+    if d == 1:
+        print(f"Position value is: {s}")
+    elif d == 2:
+        print(f"Velocity value is: {s}")
+    elif d == 3:
+        print(f"Current value is: {s}")
+
+# Define byte parameters that will be send to our controller
+byte_message = bytes("MO=1;", "utf-8")  # Motor initiation 
+byte_message1 = bytes("MO;", "utf-8")  # Motor status
+byte_message2 = bytes("JV=2778;", "utf-8")  # Speed command initiation
+byte_message3 = bytes("BG;", "utf-8")  # Continuous operation initiation
+byte_message4 = bytes("PX;", "utf-8")  # Position (rev)
+byte_message5 = bytes("VX;", "utf-8")  # Speed
+byte_message6 = bytes("IQ;", "utf-8")  # Current
+stop = bytes("MO=0;", "utf-8")  # Motor stop
+
+# START BUTTON: Send stop signal and establish the first connection via SOCKET
+def start_motor():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.sendto(stop, (UDP_IP, UDP_PORT))
+    print("UDP target IP: %s" % UDP_IP)
+    print("UDP target port: %s" % UDP_PORT)
+    time.sleep(1)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    print("SOCKET ESTABLISHED")
+    time.sleep(2)
+    sock.sendto(byte_message, (UDP_IP, UDP_PORT)) #aet MO=1
+    data = sock.recv(1024)
+    s = data.decode('utf-8')
+    s = remove_semicolon(s)
+    print(f"Set {s}")
+    time.sleep(2)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #asking MO status
+    sock.sendto(byte_message1, (UDP_IP, UDP_PORT))
+    data1 = sock.recv(1024)
+    s1 = data1.decode('utf-8')
+    time.sleep(1)
+    sock.sendto(byte_message2, (UDP_IP, UDP_PORT))
+    datax = sock.recv(1024)
+    sx = datax.decode('utf-8')
+    sx = remove_semicolon(sx)
+    print("Motor value set to %s" % sx)
+    time.sleep(2)
+    sock.sendto(byte_message2, (UDP_IP, UDP_PORT)) ## sending the speed value
+    data2 = sock.recv(1024)
+    s2 = data2.decode('utf-8')
+    s2 = remove_semicolon(s2)
+    print("Speed value set to %s" % s2)
+    time.sleep(2)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) #enable BG
+    time.sleep(2)
+    sock.sendto(byte_message3, (UDP_IP, UDP_PORT))
+    data3 = sock.recv(1024)
+    s3 = data3.decode('utf-8')
+    s3 = remove_semicolon(s3)
+    print("Initiated controller %s" % s3) 
+    time.sleep(2)
+
+
+#STOP BUTTON
+def stop_motor():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    print("\nData saved to 'Crafted_data_with_tabs.xlsx'.")
+    print("Exiting...")
+    sock.sendto(stop, (UDP_IP, UDP_PORT))  # Stop the motor
+    print("Motor stopped.\nGoodbye :) \nCreated by M&G")
+
+# Initialize a global variable for the thread
+extraction_thread = None
+
+# INITIATE CRAFT BUTTON
+def data_extraction():
+    global extraction_thread
+    if extraction_thread is None or not extraction_thread.is_alive():
+        extraction_thread = threading.Thread(target=perform_data_extraction)
+        extraction_thread.daemon = True  # This allows the thread to be terminated when the program exits.
+        extraction_thread.start()
+
+#INITIATE CRAFT BUTTON VIA THREAD
+def perform_data_extraction():
+    print("Starting 'While' loop\n\nCRAFTED_VALUES:")
+    time.sleep(0.5)
+    excel_file = "Crafted_data_with_tabs.xlsx"
+
+    try:
+        wb = load_workbook(excel_file, read_only=False, keep_vba=True, data_only=False, keep_links=True)
+    except FileNotFoundError:
+        wb = Workbook()
+        wb.save(excel_file)
+    else:
+        if "sheet" in wb.sheetnames:
+            sheet = wb["sheet"]
+            wb.remove(sheet)
+            wb.save(excel_file)
+
+    try:
+        while True:
+            comm(byte_message4, 1) #asking for position value
+            comm(byte_message5, 2) #asking for speed v  alue
+            comm(byte_message6, 3) #asking for position value
+            with pd.ExcelWriter(excel_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:         # Append data to the existing excel file. known bug: additional unwanted sheet added. 
+                gdata.to_excel(writer, sheet_name="main", index=False)
+                position_data.to_excel(writer, sheet_name="position_values", index=False)
+                speed_data.to_excel(writer, sheet_name="speed_values", index=False)
+                current_data.to_excel(writer, sheet_name="current_values", index=False)
+    except KeyboardInterrupt: #ending the program
+        print("\nData saved to 'Crafted_data_with_tabs.xlsx'.")
+        print("Exiting...")
+        sock.sendto(stop, (UDP_IP, UDP_PORT))     # Stop the motor
+        print("Motor stopped.\nGoodbye :) \nCreated by M&G")
+
+# Create the main GUI window
+root = tk.Tk()
+root.title("Motor Control Application")
+
+# Create "START" and "STOP" buttons
+start_button = ttk.Button(root, text="START", command=start_motor)
+stop_button = ttk.Button(root, text="STOP", command=stop_motor)
+data_extraction = ttk.Button(root, text="START_EXTRACTION", command=data_extraction)
+
+# Place the buttons on the window
+start_button.pack(pady=10)
+stop_button.pack(pady=10)
+data_extraction.pack(pady=10)
+
+# Start the GUI main loop
+root.mainloop()
