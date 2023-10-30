@@ -14,4 +14,4 @@
 	v 4.1 adding START STOP buttons
 	v 4.2 fixing excel bugs
 # not released v5 - AI
-# Feel free to contact me for furtur support
+	Feel free to contact me for support/questions/previous versions
