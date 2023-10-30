@@ -1,4 +1,5 @@
 # v1 - establishing connecting to ELMO controller via socket interface + elimnating noise
+	v1.0 establishing UDP connections
 # v2 - adding harvest option and storing all the data in excel
 	v2.1 code refining
 	v2.2 change string to numbers
